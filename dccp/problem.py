@@ -16,7 +16,7 @@ logger.propagate = False
 
 
 def dccp(self, max_iter = 100, tau = 0.005, mu = 1.2, tau_max = 1e8,
-         solver = None, ccp_times = 1, max_slack = 1e-3, ep = 1e-5, **kwargs):
+         solver = None, ccp_times = 1, max_slack = 1e-3, ep = 1e-5, fast=False, **kwargs):
     """
     main algorithm ccp
     :param max_iter: maximum number of iterations in ccp
@@ -39,30 +39,14 @@ def dccp(self, max_iter = 100, tau = 0.005, mu = 1.2, tau_max = 1e8,
     for t in range(ccp_times): # for each time of running ccp
         dccp_ini(self, random=(ccp_times>1), solver = solver, **kwargs) # initialization; random initial value is mandatory if ccp_times>1
         # iterations
-        result_temp = iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack, **kwargs)
-        # first iteration
-        if (t == 0):
-            self._status = result_temp[-1]
-            result = result_temp
-            cost_value = result_temp[0]
-            result_record = {}
-            for var in self.variables():
-                result_record[var] = var.value
-        else:
-            if result_temp[-1] == 'Converged':
-                self._status = result_temp[-1]
-                if result_temp[0] is not None:
-                    if (cost_value is None) or (self.objective.NAME == 'minimize' and result_temp[0]<cost_value) \
-                    or (self.objective.NAME == 'maximize' and result_temp[0]>cost_value): # find a better cost value
-                        # no slack; slack small enough
-                        if len(result_temp) < 4 or result_temp[1] < max_slack:
-                            result = result_temp # update the result
-                            cost_value = result_temp[0] # update the record on the best cost value
-                            for var in self.variables():
-                                result_record[var] = var.value
-            else:
-                for var in self.variables():
-                    var.value = result_record[var]
+        result_temp = iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack, fast, **kwargs)
+        if result_temp[0] is not None:
+            if (self.objective.NAME == 'minimize' and result_temp[0]<cost_value) \
+            or (self.objective.NAME == 'maximize' and result_temp[0]>cost_value): # find a better cost value
+                # first ccp; no slack; slack small enough
+                if t==0 or len(result_temp)<3 or result[1] < max_slack:
+                    result = result_temp # update the result
+                    cost_value = result_temp[0] # update the record on the best cost value
     return result
 
 def dccp_ini(self, times = 1, random = 0, solver = None, **kwargs):
@@ -145,7 +129,7 @@ def is_dccp(problem):
     return True
 
 
-def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, **kwargs):
+def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, fast, **kwargs):
     """
     ccp iterations
     :param max_iter: maximum number of iterations in ccp
@@ -156,6 +140,7 @@ def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, **kwa
     :return
         value of the objective function, maximum value of slack variables, value of variables
     """
+    tau_cvx = cvx.Parameter(nonneg=True, value=tau)
     # split non-affine equality constraints
     constr = []
     for constraint in self.constraints:
@@ -180,58 +165,64 @@ def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, **kwa
         if not constr.is_dcp():
             var_slack.append(cvx.Variable(constr.shape))
 
-    while it <= max_iter and all(var.value is not None for var in self.variables()):
-        constr_new = []
-        # objective
-        convexified_obj = convexify_obj(self.objective)
-        if not self.objective.is_dcp():
-            # non-sub/super-diff
-            while convexified_obj is None:
+    #### THIS BLOCK MOVED OUT OF THE LOOP ####
+    constr_new = []
+    # objective
+    convexified_obj = convexify_obj(self.objective)
+    '''
+    if not self.objective.is_dcp():
+        # non-sub/super-diff
+        while convexified_obj is None:
+            # damping
+            var_index = 0
+            for var in self.variables():
+                #var_index = self.variables().index(var)
+                var.value = 0.8*var.value + 0.2* variable_pres_value[var_index]
+                var_index += 1
+            convexified_obj = convexify_obj(self.objective)
+        # domain constraints
+        for dom in self.objective.expr.domain:
+            constr_new.append(dom)
+    '''
+    # new cost function
+    cost_new = convexified_obj.expr
+
+    # constraints
+    count_slack = 0
+    for arg in self.constraints:
+        temp = convexify_constr(arg)
+        if not arg.is_dcp():
+            while temp is None:
                 # damping
-                var_index = 0
-                for var in self.variables():
-                    #var_index = self.variables().index(var)
-                    var.value = 0.8*var.value + 0.2* variable_pres_value[var_index]
-                    var_index += 1
-                convexified_obj = convexify_obj(self.objective)
-            # domain constraints
-            for dom in self.objective.expr.domain:
+                for var in self.variables:
+                    var_index = self.variables().index(var)
+                    var.value = 0.8 * var.value + 0.2 * variable_pres_value[var_index]
+                temp = convexify_constr(arg)
+            newcon = temp[0]  # new constraint without slack variable
+            for dom in temp[1]:# domain
                 constr_new.append(dom)
-        # new cost function
-        cost_new =  convexified_obj.expr
-
-        # constraints
-        count_slack = 0
-        for arg in self.constraints:
-            temp = convexify_constr(arg)
-            if not arg.is_dcp():
-                while temp is None:
-                    # damping
-                    for var in self.variables:
-                        var_index = self.variables().index(var)
-                        var.value = 0.8 * var.value + 0.2 * variable_pres_value[var_index]
-                    temp = convexify_constr(arg)
-                newcon = temp[0]  # new constraint without slack variable
-                for dom in temp[1]:# domain
-                    constr_new.append(dom)
-                constr_new.append(newcon.expr <= var_slack[count_slack])
-                constr_new.append(var_slack[count_slack] >= 0)
-                count_slack = count_slack + 1
-            else:
-                constr_new.append(arg)
-
-        # objective
-        if self.objective.NAME == 'minimize':
-            for var in var_slack:
-                cost_new += tau*cvx.sum(var)
-            obj_new = cvx.Minimize(cost_new)
+            constr_new.append(newcon.expr <= var_slack[count_slack])
+            constr_new.append(var_slack[count_slack] >= 0)
+            count_slack = count_slack + 1
         else:
-            for var in var_slack:
-                cost_new -= tau*cvx.sum(var)
-            obj_new = cvx.Maximize(cost_new)
+            constr_new.append(arg)
 
-        # new problem
-        prob_new = cvx.Problem(obj_new, constr_new)
+    # objective
+    if self.objective.NAME == 'minimize':
+        for var in var_slack:
+            cost_new += tau_cvx*cvx.sum(var)
+        obj_new = cvx.Minimize(cost_new)
+    else:
+        for var in var_slack:
+            cost_new -= tau_cvx*cvx.sum(var)
+        obj_new = cvx.Maximize(cost_new)
+    # new problem
+    prob_new = cvx.Problem(obj_new, constr_new)
+
+    #### THIS BLOCK MOVED OUT OF THE LOOP ####
+
+
+    while it <= max_iter and all(var.value is not None for var in self.variables()):
         # keep previous value of variables
         variable_pres_value = []
         for var in self.variables():
@@ -248,14 +239,17 @@ def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, **kwa
             max_slack = max([np.max(v) for v in slack_values] + [-np.inf])
             logger.info("max slack = %.5f", max_slack)
         #terminate
-        if prob_new.value is not None and np.abs(previous_cost - prob_new.value) <= ep and np.abs(self.objective.value - previous_org_cost) <= ep \
-                and (max_slack is None or max_slack <= max_slack_tol ):
+        if (not fast and prob_new.value is not None and np.abs(previous_cost - prob_new.value) <= ep and np.abs(self.objective.value - previous_org_cost) <= ep \
+               and (max_slack is None or max_slack <= max_slack_tol)) or \
+                (fast and prob_new.value is not None and np.abs(self.objective.value - previous_org_cost) <= ep \
+                and (max_slack is None or max_slack <= max_slack_tol)):
             it = max_iter+1
             converge = True
         else:
             previous_cost = prob_new.value
             previous_org_cost = self.objective.value
             tau = min([tau*mu,tau_max])
+            tau_cvx.value = tau
             it += 1
     # return
     if converge:
@@ -266,8 +260,8 @@ def iter_dccp(self, max_iter, tau, mu, tau_max, solver, ep, max_slack_tol, **kwa
     for var in self.variables():
         var_value.append(var.value)
     if not var_slack == []:
-        return(self.objective.value, max_slack, var_value, self._status)
+        return(self.objective.value, max_slack, var_value)
     else:
-        return(self.objective.value, var_value, self._status)
+        return(self.objective.value, var_value)
 
 cvx.Problem.register_solve("dccp", dccp)
