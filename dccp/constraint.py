@@ -44,7 +44,7 @@ def convexify_para_constr(self):
     else:
         return self
 
-def convexify_constr(constr):
+def convexify_constr(constr, vars=None, grads=None):
     """
     :param constr: a constraint of a problem
     :return:
@@ -56,7 +56,7 @@ def convexify_constr(constr):
         dom = []
         # left hand concave
         if constr.args[0].curvature == 'CONCAVE':
-            left = linearize(constr.args[0])
+            left = linearize(constr.args[0], vars=vars, grads=grads)
             if left is None:
                 return None
             else:
@@ -66,7 +66,7 @@ def convexify_constr(constr):
             left = constr.args[0]
         # right hand convex
         if constr.args[1].curvature == 'CONVEX':
-            right = linearize(constr.args[1])
+            right = linearize(constr.args[1], vars=vars, grads=grads)
             if right is None:
                 return None
             else:
@@ -74,6 +74,6 @@ def convexify_constr(constr):
                     dom.append(con)
         else:
             right = constr.args[1]
-        return cvx.real(left - right) <= 0, dom
+        return left - right <= 0, dom
     else:
         return constr

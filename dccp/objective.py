@@ -34,14 +34,14 @@ def is_dccp(objective):
     else:
         return True
 
-def convexify_obj(obj):
+def convexify_obj(obj, vars=None, grads=None):
     """
     :param obj: objective of a problem
     :return: convexified onjective or None
     """
     # not dcp
     if obj.is_dcp() == False:
-        lin = linearize(obj.expr)
+        lin = linearize(obj.expr, vars=vars, grads=grads)
         # non-sub/super-diff
         if lin is None:
             return None
